@@ -6,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8029167800:AAFJDZw7VGKARPh07QP63fD71Sb06teX6ro")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 HIBP_API_KEY = os.getenv("HIBP_API_KEY", "")  # optional, for breach check
 
 # 300+ sites for username search
@@ -267,13 +267,17 @@ async def get_ip_info(ip: str) -> dict:
 
 async def get_domain_info(domain: str) -> dict:
     results = {}
+    import socket
+    try:
+        ip = socket.gethostbyname(domain)
+        results["ip"] = ip
+    except:
+        return results
     try:
         async with aiohttp.ClientSession() as session:
-            # IP from domain
-            async with session.get(f"https://ipapi.co/{domain}/json/", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(f"https://ipapi.co/{ip}/json/", timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    results["ip"] = data.get("ip")
                     results["org"] = data.get("org")
                     results["country"] = data.get("country_name")
                     results["city"] = data.get("city")
@@ -285,20 +289,17 @@ async def get_domain_info(domain: str) -> dict:
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🔍 *OSINT Search Bot*\n\n"
-        "Kya search karna hai?\n\n"
-        "Commands:\n"
-        "`/username <name>` — 50+ platforms pe search\n"
-        "`/email <email>` — breach check (HIBP)\n"
+        "🔍 *OSINT Search Bot*\n\nAvailable Commands:\n"
+        "`/username <name>` — search 180+ platforms\n"
+        "`/email <email>` — data breach check\n"
         "`/ip <address>` — IP info & location\n"
-        "`/domain <domain>` — domain/site info\n\n"
-        "Example: `/username volt`"
+        "`/domain <domain>` — domain info"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_username(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await update.message.reply_text("Usage: `/username <name>`\nExample: `/username volt`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("Usage: `/username <name>`\nExample: `/username john`", parse_mode=ParseMode.MARKDOWN)
         return
 
     username = ctx.args[0].strip().lstrip("@")
@@ -307,7 +308,7 @@ async def cmd_username(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     found = await search_username(username)
 
     if not found:
-        await msg.edit_text(f"❌ `{username}` — koi bhi platform pe nahi mila.", parse_mode=ParseMode.MARKDOWN)
+        await msg.edit_text(f"❌ `{username}` — not found on any platform.", parse_mode=ParseMode.MARKDOWN)
         return
 
     lines = [f"✅ *Found `{username}` on {len(found)} platforms:*\n"]
@@ -342,8 +343,8 @@ async def cmd_email(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not HIBP_API_KEY:
         await msg.edit_text(
-            "⚠️ *HIBP API key set nahi hai.*\n\n"
-            "Free check ke liye manually visit karo:\n"
+            "⚠️ *HIBP API key not configured.*\n\n"
+            "Check manually at:\n"
             f"👉 https://haveibeenpwned.com/account/{email}",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -355,7 +356,7 @@ async def cmd_email(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if not breaches:
-        await msg.edit_text(f"✅ `{email}` — *koi breach nahi mila!* Safe hai.", parse_mode=ParseMode.MARKDOWN)
+        await msg.edit_text(f"✅ `{email}` — *No breaches found!* You're safe.", parse_mode=ParseMode.MARKDOWN)
     else:
         breach_list = "\n".join([f"• {b}" for b in breaches])
         await msg.edit_text(
@@ -412,7 +413,7 @@ async def cmd_domain(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Commands use karo:\n"
+        "Please use a command:\n"
         "`/username <name>`\n"
         "`/email <address>`\n"
         "`/ip <address>`\n"
