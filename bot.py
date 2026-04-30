@@ -6,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8029167800:AAFJDZw7VGKARPh07QP63fD71Sb06teX6ro")
 HIBP_API_KEY = os.getenv("HIBP_API_KEY", "")  # optional, for breach check
 
 # 300+ sites for username search
