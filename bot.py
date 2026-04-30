@@ -1,12 +1,74 @@
 import os
 import asyncio
 import aiohttp
+from aiohttp import web
 import json
+import sqlite3
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8029167800:AAFJDZw7VGKARPh07QP63fD71Sb06teX6ro")
+# ── Config ────────────────────────────────────────────────────────────────────
+ADMIN_CODE = os.getenv("ADMIN_CODE", "VOLT_ADMIN_2024")  # change this in Railway env vars
+FREE_LIMIT = 5  # searches before ad
+
+# ── Database ──────────────────────────────────────────────────────────────────
+def init_db():
+    conn = sqlite3.connect("/app/users.db")
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        is_admin INTEGER DEFAULT 0,
+        searches_used INTEGER DEFAULT 0,
+        ads_watched INTEGER DEFAULT 0
+    )""")
+    conn.commit()
+    conn.close()
+
+def get_user(user_id):
+    conn = sqlite3.connect("/app/users.db")
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    if not row:
+        c.execute("INSERT INTO users VALUES (?,0,0,0)", (user_id,))
+        conn.commit()
+        c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+        row = c.fetchone()
+    conn.close()
+    return {"user_id": row[0], "is_admin": row[1], "searches_used": row[2], "ads_watched": row[3]}
+
+def set_admin(user_id):
+    conn = sqlite3.connect("/app/users.db")
+    c = conn.cursor()
+    c.execute("UPDATE users SET is_admin=1 WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def increment_search(user_id):
+    conn = sqlite3.connect("/app/users.db")
+    c = conn.cursor()
+    c.execute("UPDATE users SET searches_used=searches_used+1 WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def increment_ad(user_id):
+    conn = sqlite3.connect("/app/users.db")
+    c = conn.cursor()
+    c.execute("UPDATE users SET ads_watched=ads_watched+1, searches_used=0 WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def can_search(user):
+    if user["is_admin"]:
+        return True, None
+    remaining = FREE_LIMIT - user["searches_used"]
+    if remaining > 0:
+        return True, remaining
+    return False, 0
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 HIBP_API_KEY = os.getenv("HIBP_API_KEY", "")  # optional, for breach check
 
 # 300+ sites for username search
@@ -211,12 +273,78 @@ SHERLOCK_SITES = {
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+# Per-site "not found" indicators in response body
+NOT_FOUND_STRINGS = {
+    "GitHub": ["Not Found", "page not found"],
+    "Instagram": ["Page Not Found", "isn't available"],
+    "Reddit": ["page not found", "Sorry, nobody on Reddit goes by that name"],
+    "TikTok": ["Couldn't find this account"],
+    "YouTube": ["This page isn't available"],
+    "Twitch": ["Sorry. Unless you've got a time machine"],
+    "Pinterest": ["Hmm, we couldn't find that page"],
+    "Steam": ["The specified profile could not be found"],
+    "Roblox": ["Page cannot be found"],
+    "Chess.com": ["Oops! That page can't be found"],
+    "Lichess": ["404"],
+    "Duolingo": ["couldn't find"],
+    "DeviantArt": ["Not Found"],
+    "Behance": ["Page Not Found"],
+    "Dribbble": ["Whoops, that page is gone"],
+    "ArtStation": ["Page Not Found"],
+    "Medium": ["Page not found"],
+    "Quora": ["Page Not Found"],
+    "Replit": ["Page not found"],
+    "GitLab": ["404"],
+    "HackerNews": ["No such user"],
+    "Keybase": ["isn't a Keybase user"],
+    "Fiverr": ["Page Not Found"],
+    "Pastebin": ["Page Not Found"],
+    "Wattpad": ["Page not found"],
+    "Goodreads": ["Page not found"],
+    "Letterboxd": ["Letterboxd — Error"],
+    "SoundCloud": ["We can't find that user"],
+    "Last.fm": ["User not found"],
+    "Spotify": ["Page not found"],
+    "Tumblr": ["There's nothing here"],
+    "Substack": ["Page not found"],
+    "Itch.io": ["is not a valid page"],
+    "Newgrounds": ["404"],
+    "MyAnimeList": ["Invalid Username"],
+    "AniList": ["404"],
+    "Speedrun.com": ["No user found"],
+    "Faceit": ["404"],
+    "HackerRank": ["404"],
+    "LeetCode": ["Page not found"],
+    "Codeforces": ["404"],
+    "Kaggle": ["Page not found"],
+    "Linktree": ["Sorry, this page isn't available"],
+    "Carrd": ["Hmm"],
+    "Ko-fi": ["Page not found"],
+    "Patreon": ["Page Not Found"],
+    "Etsy": ["404"],
+    "eBay": ["Page Not Found"],
+    "Strava": ["404"],
+    "Goodreads": ["Page not found"],
+    "TryHackMe": ["404"],
+}
+
 async def check_username_url(session, site, url):
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8), 
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8),
                                allow_redirects=True,
-                               headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                               headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}) as resp:
+            if resp.status == 404:
+                return site, url, False
             if resp.status == 200:
+                # Check response body for "not found" strings if we have them for this site
+                if site in NOT_FOUND_STRINGS:
+                    try:
+                        body = await resp.text(errors="ignore")
+                        for bad_str in NOT_FOUND_STRINGS[site]:
+                            if bad_str.lower() in body.lower():
+                                return site, url, False
+                    except:
+                        pass
                 return site, url, True
     except:
         pass
@@ -288,20 +416,89 @@ async def get_domain_info(domain: str) -> dict:
 # ── Bot Handlers ──────────────────────────────────────────────────────────────
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    init_db()
+    user = get_user(update.effective_user.id)
+    if user["is_admin"]:
+        status = "👑 *Admin — Unlimited access*"
+    else:
+        remaining = FREE_LIMIT - user["searches_used"]
+        status = f"🔢 *Free searches remaining: {remaining}/{FREE_LIMIT}*\nWatch an ad with /watchad to get {FREE_LIMIT} more."
     text = (
-        "🔍 *OSINT Search Bot*\n\nAvailable Commands:\n"
+        f"🔍 *OSINT Search Bot*\n\n{status}\n\n"
+        "Available Commands:\n"
         "`/username <name>` — search 180+ platforms\n"
         "`/email <email>` — data breach check\n"
         "`/ip <address>` — IP info & location\n"
-        "`/domain <domain>` — domain info"
+        "`/domain <domain>` — domain info\n"
+        "`/watchad` — watch ad to get more searches\n"
+        "`/activate <code>` — enter special code"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+async def cmd_activate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Usage: `/activate <code>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    code = ctx.args[0].strip()
+    if code == ADMIN_CODE:
+        set_admin(update.effective_user.id)
+        await update.message.reply_text("👑 *Admin access granted! Unlimited searches.*", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text("❌ Invalid code.", parse_mode=ParseMode.MARKDOWN)
+
+async def cmd_watchad(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    init_db()
+    user = get_user(update.effective_user.id)
+    if user["is_admin"]:
+        await update.message.reply_text("👑 You're an admin — unlimited searches already!", parse_mode=ParseMode.MARKDOWN)
+        return
+    # Show the ad (put your actual ad link/image/text here)
+    keyboard = [[InlineKeyboardButton("✅ I watched the ad — give me searches!", callback_data="ad_done")]]
+    await update.message.reply_text(
+        "📺 *Watch this ad to get 5 more searches:*\n\n"
+        "👉 https://www.youtube.com/watch?v=dQw4w9WgXcQ\n\n"  # replace with your actual ad link
+        "_After watching, press the button below._",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True
+    )
+
+async def ad_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "ad_done":
+        init_db()
+        increment_ad(query.from_user.id)
+        await query.edit_message_text(
+            f"✅ *Thanks! You got {FREE_LIMIT} more searches.*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+async def check_limit(update: Update) -> bool:
+    """Returns True if user can search, False if blocked."""
+    init_db()
+    user = get_user(update.effective_user.id)
+    allowed, remaining = can_search(user)
+    if not allowed:
+        keyboard = [[InlineKeyboardButton("📺 Watch Ad for more searches", callback_data="watch_ad_prompt")]]
+        await update.message.reply_text(
+            "❌ *You've used all your free searches!*\n\n"
+            "Watch a short ad to get 5 more searches.\n"
+            "Use /watchad to continue.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return False
+    return True
 
 async def cmd_username(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await update.message.reply_text("Usage: `/username <name>`\nExample: `/username john`", parse_mode=ParseMode.MARKDOWN)
         return
 
+    if not await check_limit(update):
+        return
+    increment_search(update.effective_user.id)
     username = ctx.args[0].strip().lstrip("@")
     msg = await update.message.reply_text(f"🔍 Searching `{username}` on {len(SHERLOCK_SITES)} platforms...", parse_mode=ParseMode.MARKDOWN)
 
@@ -338,37 +535,29 @@ async def cmd_email(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: `/email <address>`\nExample: `/email test@gmail.com`", parse_mode=ParseMode.MARKDOWN)
         return
 
+    if not await check_limit(update):
+        return
+    increment_search(update.effective_user.id)
     email = ctx.args[0].strip()
     msg = await update.message.reply_text(f"🔍 Checking `{email}` for breaches...", parse_mode=ParseMode.MARKDOWN)
 
-    if not HIBP_API_KEY:
-        await msg.edit_text(
-            "⚠️ *HIBP API key not configured.*\n\n"
-            "Check manually at:\n"
-            f"👉 https://haveibeenpwned.com/account/{email}",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-
-    breaches = await check_email_breach(email)
-    if breaches is None:
-        await msg.edit_text("❌ Error — try again.")
-        return
-
-    if not breaches:
-        await msg.edit_text(f"✅ `{email}` — *No breaches found!* You're safe.", parse_mode=ParseMode.MARKDOWN)
-    else:
-        breach_list = "\n".join([f"• {b}" for b in breaches])
-        await msg.edit_text(
-            f"⚠️ `{email}` *{len(breaches)} breaches mein mila:*\n\n{breach_list}",
-            parse_mode=ParseMode.MARKDOWN
-        )
+    await msg.edit_text(
+        f"🔍 *Email Breach Check*\n\n"
+        f"Check if `{email}` has been in any data breaches:\n\n"
+        f"👉 [Click here to check on HIBP](https://haveibeenpwned.com/account/{email})\n\n"
+        f"_Have I Been Pwned is the most trusted breach database._",
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=True
+    )
 
 async def cmd_ip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await update.message.reply_text("Usage: `/ip <address>`\nExample: `/ip 8.8.8.8`", parse_mode=ParseMode.MARKDOWN)
         return
 
+    if not await check_limit(update):
+        return
+    increment_search(update.effective_user.id)
     ip = ctx.args[0].strip()
     msg = await update.message.reply_text(f"🔍 Looking up `{ip}`...", parse_mode=ParseMode.MARKDOWN)
 
@@ -395,6 +584,9 @@ async def cmd_domain(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: `/domain <name>`\nExample: `/domain google.com`", parse_mode=ParseMode.MARKDOWN)
         return
 
+    if not await check_limit(update):
+        return
+    increment_search(update.effective_user.id)
     domain = ctx.args[0].strip().replace("https://", "").replace("http://", "").rstrip("/")
     msg = await update.message.reply_text(f"🔍 Looking up `{domain}`...", parse_mode=ParseMode.MARKDOWN)
 
@@ -421,16 +613,73 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN
     )
 
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("username", cmd_username))
-    app.add_handler(CommandHandler("email", cmd_email))
-    app.add_handler(CommandHandler("ip", cmd_ip))
-    app.add_handler(CommandHandler("domain", cmd_domain))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+# ── HTTP Webhook Server for Adsgram Reward URL ───────────────────────────────
+
+async def handle_reward(request):
+    """Adsgram calls this URL after user watches ad."""
+    user_id = request.rel_url.query.get("userid")
+    if user_id:
+        try:
+            init_db()
+            increment_ad(int(user_id))
+            print(f"Reward granted to user {user_id}")
+            # Notify user in Telegram
+            try:
+                bot_app = request.app["bot_app"]
+                await bot_app.bot.send_message(
+                    chat_id=int(user_id),
+                    text=f"✅ *Ad watched! You got {FREE_LIMIT} more searches.*",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                print(f"Could not notify user: {e}")
+        except Exception as e:
+            print(f"Reward error: {e}")
+    return web.Response(text="OK", status=200)
+
+async def handle_health(request):
+    return web.Response(text="Bot is running!", status=200)
+
+async def run_web_server(bot_app):
+    web_app = web.Application()
+    web_app["bot_app"] = bot_app
+    web_app.router.add_get("/reward", handle_reward)
+    web_app.router.add_get("/", handle_health)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    await site.start()
+    print("HTTP server running on port 8080")
+    return runner
+
+async def main_async():
+    bot_app = Application.builder().token(BOT_TOKEN).build()
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(CommandHandler("username", cmd_username))
+    bot_app.add_handler(CommandHandler("email", cmd_email))
+    bot_app.add_handler(CommandHandler("ip", cmd_ip))
+    bot_app.add_handler(CommandHandler("domain", cmd_domain))
+    bot_app.add_handler(CommandHandler("activate", cmd_activate))
+    bot_app.add_handler(CommandHandler("watchad", cmd_watchad))
+    bot_app.add_handler(CallbackQueryHandler(ad_callback))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # Start HTTP server
+    runner = await run_web_server(bot_app)
+
+    # Start bot
     print("Bot running...")
-    app.run_polling()
+    async with bot_app:
+        await bot_app.initialize()
+        await bot_app.start()
+        await bot_app.updater.start_polling()
+        # Keep running forever
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await bot_app.updater.stop()
+            await bot_app.stop()
+            await runner.cleanup()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())
